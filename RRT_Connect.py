@@ -1,5 +1,5 @@
 import random
-from RRT import RRT, Vertex
+from RRT import RRT
 from itertools import count
 
 import matplotlib.pyplot as plt
@@ -15,24 +15,28 @@ class RRT_Connect(RRT):
         plt.clf()
         # Plot the sampled vector as a black plus sign
         if sampled_vec is not None:
-            plt.plot(sampled_vec.x, sampled_vec.y, "Pk")
+            plt.plot(sampled_vec.state[0], sampled_vec.state[1], "Pk")
 
         # Plot edges as yellow lines
         for vertex in self.vertices:
             if vertex.parent:
-                plt.plot(vertex.path_x, vertex.path_y, "-y")
+                path_x = [p[0] for p in vertex.path]
+                path_y = [p[1] for p in vertex.path]
+                plt.plot(path_x, path_y, "-y")
 
         for vertex in self.vertices_b:
             if vertex.parent:
-                plt.plot(vertex.path_x, vertex.path_y, "-y")
+                path_x = [p[0] for p in vertex.path]
+                path_y = [p[1] for p in vertex.path]
+                plt.plot(path_x, path_y, "-y")
 
         for o in self.obstacle:
             # Plot the blue rectangle obstacle
             self.plot_rectangle(o)
 
         # Plot the green start "S" and red goal "G"
-        plt.plot(self.start.x, self.start.y, c="g", marker=r"$\mathbb{S}$")
-        plt.plot(self.goal.x, self.goal.y, c="r", marker=r"$\mathbb{G}$")
+        plt.plot(self.start.state[0], self.start.state[1], c="g", marker=r"$\mathbb{S}$")
+        plt.plot(self.goal.state[0], self.goal.state[1], c="r", marker=r"$\mathbb{G}$")
 
         plt.axis("equal")
         plt.axis([self.min_rand, self.max_rand, self.min_rand, self.max_rand])
@@ -82,21 +86,21 @@ class RRT_Connect(RRT):
         if len(intersection) == 0:
             print("Error in breaking out of planning, the two sets do not share a vertex")
 
-        path_a = [[intersection[0].x, intersection[0].y]]
-        path_b = [[intersection[0].x, intersection[0].y]]
+        path_a = [[intersection[0].state[0], intersection[0].state[1]]]
+        path_b = [[intersection[0].state[0], intersection[0].state[1]]]
 
         vertex = self.vertices[intersection_1]
         while vertex.parent is not None:
-            path_a.append([vertex.x, vertex.y])
+            path_a.append(vertex.state)
             vertex = vertex.parent
 
         vertex_b = self.vertices_b[intersection_2]
         while vertex_b.parent is not None:
-            path_b.append([vertex_b.x, vertex_b.y])
+            path_b.append(vertex_b.state)
             vertex_b = vertex_b.parent
 
-        path_a.append([vertex.x, vertex.y])
-        path_b.append([vertex_b.x, vertex_b.y])
+        path_a.append(vertex.state)
+        path_b.append(vertex_b.state)
         path = path_a[1:][::-1] + path_b
         self.num_vertices = len(self.vertices) + len(self.vertices_b)
 
@@ -104,8 +108,8 @@ class RRT_Connect(RRT):
 
     def sample_random_vertex(self):
         while True:
-            sampled_vec = Vertex(random.uniform(self.min_rand, self.max_rand),
-                                 random.uniform(self.min_rand, self.max_rand))
-            if self.obstacle_Free(sampled_vec):
+            sampled_vec = self.Vertex([random.uniform(self.min_rand, self.max_rand),
+                                 random.uniform(self.min_rand, self.max_rand)])
+            if self.is_vertex_valid(sampled_vec):
                 break
         return sampled_vec

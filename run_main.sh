@@ -1,0 +1,1 @@
+python3.11 main.py --animation t --obstacle 1 --algorithm "RRBT" --mode "debug"

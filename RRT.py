@@ -5,33 +5,25 @@ from itertools import count
 import matplotlib.pyplot as plt
 import numpy as np
 
-
-class Vertex:
-    def __init__(self, state):
-        """
-        Initialize a vertex in R^n
-
-        Args:
-            state: numpy array representing position in R^n
-        """
-        self.state = np.array(state, dtype=float)
-        self.path = []  # List to store path points
-        self.parent = None
-
-    def __eq__(self, other):
-        if isinstance(other, Vertex):
-            return np.array_equal(self.state, other.state)
-        return False
-
-    def __hash__(self):
-        return hash(tuple(self.state))
-
-    def dimension(self):
-        """Return dimension of the state space"""
-        return len(self.state)
-
-
 class RRT:
+    class Vertex:
+        def __init__(self, state):
+            self.state = np.array(state, dtype=float)
+            self.path = [(tuple(self.state))]  # List of tuples storing path points
+            self.parent = None
+
+        def __eq__(self, other):
+            if isinstance(other, self.__class__):
+                return np.array_equal(self.state, other.state)
+            return False
+
+        def __hash__(self):
+            return hash(tuple(self.state))
+
+        def dimension(self):
+            """Return dimension of the state space"""
+            return len(self.state)
+
     def __init__(self, start, goal, obstacle, workspace, animation=True, eta=2.5,
                  goal_sample_rate=0.01):
         """
@@ -40,8 +32,8 @@ class RRT:
         obstacle:Coordinates of rectangle obstacle [left,right,bottom,top]
         workspace:Min/max coordinates of our square arena [min,max]
         """
-        self.start = Vertex(start)
-        self.goal = Vertex(goal)
+        self.start = self.Vertex(start)
+        self.goal = self.Vertex(goal)
         self.min_rand = workspace[0]
         self.max_rand = workspace[1]
         self.eta = eta
@@ -65,33 +57,31 @@ class RRT:
         for self.iterations in count():
             if self.goal in self.vertices:
                 break
-            x_rand = self.sample_random_vertex()
-            v_nearest = self.get_nearest_vertex(x_rand, self.vertices)
+            x_rand = self.Vertex(self.sample_random_vertex())
+            v_nearest = self.get_nearest_vertex(x_rand.state, self.vertices)
             x_new = self.steer(v_nearest, x_rand)
 
             if self.is_edge_valid(v_nearest, x_new):
                 self.vertices.append(x_new)
 
-            if self.iterations % 3 and self.animation is True == 0:
+            if self.iterations % 3 == 0 and self.animation is True:
                 self.update_graph(x_rand)
 
         return self.final_path(len(self.vertices) - 1)
 
     def steer(self, v_nearest, x_rand):
-        x_new = Vertex(v_nearest.state)
+        x_new = self.Vertex(v_nearest.state)
         d, angle = self.calc_distance_and_angle(x_new, x_rand)
 
         x_new.path = [x_new.state]
-
         if self.eta < d:
-            x_new.state += self.eta * math.cos(angle)
-            x_new.state += self.eta * math.sin(angle)
+            x_new.state = [x_new.state[0] + self.eta * math.cos(angle),
+                          x_new.state[1] + self.eta * math.sin(angle)]
         else:
-            x_new.state += d * math.cos(angle)
-            x_new.state += d * math.sin(angle)
-
+            x_new.state = [x_new.state[0] + d * math.cos(angle),
+                          x_new.state[1] + d * math.sin(angle)]
+        
         x_new.path.append(x_new.state)
-
         x_new.parent = v_nearest
 
         return x_new
@@ -101,14 +91,20 @@ class RRT:
             return False
         for o in self.obstacle:
             left, right, bottom, top = o
-            for x, y in zip(vertex.path_x, vertex.path_y):
-                if (left <= x <= right and bottom <= y <= top):
-                    return False
+            if not isinstance(vertex, self.Vertex):
+                vertex = self.Vertex(vertex)
+            x, y = vertex.state[0], vertex.state[1]  # Extract x,y from state vector
+            if (left <= x <= right and bottom <= y <= top):
+                return False
+            # for point in vertex.path:
+            #     x, y = point[0], point[1]  # Extract x,y from state vector
+            #     if (left <= x <= right and bottom <= y <= top):
+            #         return False
         return True
 
     def is_edge_valid(self, v_nearest, x_rand):
         path_resolution = 0.1
-        x_new = Vertex(v_nearest.state)
+        x_new = self.Vertex(v_nearest.state)
         d, angle = self.calc_distance_and_angle(x_new, x_rand)
         if not self.is_vertex_valid(x_rand):
             return False
@@ -120,8 +116,7 @@ class RRT:
             n_steps = math.floor(self.eta / path_resolution)
 
         for _ in range(n_steps):
-            x_new.state += path_resolution * math.cos(angle)
-            x_new.state += path_resolution * math.sin(angle)
+            x_new.state += path_resolution * np.array([math.cos(angle), math.sin(angle)])
             if not self.is_vertex_valid(x_new):
                 return False
             x_new.path.append(x_new.state)
@@ -142,7 +137,9 @@ class RRT:
         # Plot edges as yellow lines
         for vertex in self.vertices:
             if vertex.parent:
-                plt.plot(vertex.path_x, vertex.path_y, "-y")
+                path_x = [p[0] for p in vertex.path]
+                path_y = [p[1] for p in vertex.path]
+                plt.plot(path_x, path_y, "-y")
 
         for o in self.obstacle:
             # Plot the blue rectangle obstacle
@@ -159,19 +156,21 @@ class RRT:
         plt.grid(True)
         plt.pause(0.01)
 
-    def sample_random_vertex(self):
+    def sample_random_vertex(self, d=2):
         if random.random() <= self.goal_sample_rate:
-            sampled_vec = Vertex(self.goal.state)
+            sampled_vec = self.goal.state
         else:
             while True:
-                sampled_vec = Vertex(np.array([random.uniform(self.min_rand, self.max_rand),
-                                               random.uniform(self.min_rand, self.max_rand)]))
+                sampled_vec = np.array([random.uniform(self.min_rand, self.max_rand),
+                                               random.uniform(self.min_rand, self.max_rand)])
                 if self.is_vertex_valid(sampled_vec) is True:
                     break
         return sampled_vec
 
     def get_nearest_vertex(self, x_rand, vertices):
-        dlist = [self.L2_norm(vertex, x_rand) for vertex in vertices]
+        # if not isinstance(x_rand, self.Vertex):
+        #     x_rand = self.Vertex(x_rand)
+        dlist = [np.linalg.norm(vertex.state - x_rand) for vertex in vertices]
         minind = dlist.index(min(dlist))
         return vertices[minind]
 
@@ -184,10 +183,6 @@ class RRT:
         path.append([vertex.state[0], vertex.state[1]])
         self.num_vertices = len(self.vertices)
         return path
-
-    @staticmethod
-    def L2_norm(left, right):
-        return (left.state[0] - right.state[0])**2 + (left.state[1] - right.state[1])**2
 
     @staticmethod
     def convert_to_rectangle(l, width, min_rand, max_rand):
@@ -210,12 +205,8 @@ class RRT:
     def plot_rectangle(rectangle, color="-b"):
         left, right, bottom, top = rectangle
 
-        # Rectangle corners
-        x_coords = [left, right, right, left, left]
-        y_coords = [bottom, bottom, top, top, bottom]
-
         # Plot the rectangle
-        plt.plot(x_coords, y_coords, color)
+        plt.fill([left, right, right, left, left], [bottom, bottom, top, top, bottom], color)
 
     @staticmethod
     def calc_distance_and_angle(parent, child):
