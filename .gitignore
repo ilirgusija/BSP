@@ -1,3 +1,7 @@
 .DS_Store
 *.pdf
 __pycache__
+tex
+!tex/report.tex
+!tex/refs.bib
+!tex/IEEEtran.cls

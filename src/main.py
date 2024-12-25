@@ -2,11 +2,13 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from RRT import RRT
-from RRT_Connect import RRT_Connect
-from RRBT import RRBT
+from RandomTrees.RRT import RRT
+from RandomTrees.RRT_Connect import RRT_Connect
+from RandomTrees.RRBT import RRBT
+from Roadmaps.PRM import PRM
+from Roadmaps.BRM import BRM
 import math
-import inquirer  # You'll need to: pip install inquirer
+import inquirer
 
 def get_rrbt_params(goal):
     """Interactive prompt for RRBT-specific parameters using inquirer"""
@@ -101,39 +103,81 @@ def get_rrbt_params(goal):
         'measurement_zone': params['measurement_zone']
     }
     
-def main(obs, alg, animation, debug_mode=True):
-    # Get start and goal configurations
-    start, goal = get_start_goal_config()
+def get_brm_params():
+    """Interactive prompt for RRBT-specific parameters using inquirer"""
+    # Show all default values first
+    defaults = {
+        'process_noise': 0.001,
+        'sigma': 0.001,
+        'measurement_zone': (0, 100, 100, 75)
+    }
     
-    # Get obstacle configuration
-    obstacle = get_obstacle_config(obs, start, goal)
+    print("\nDefault BRM parameters:")
+    for key, value in defaults.items():
+        print(f"{key}: {value}")
     
-    if alg == "RRBT":
-        # Get RRBT-specific parameters through interactive prompt
-        rrbt_params = get_rrbt_params(goal)
-        
-        # Modify start to include uncertainty
-        start = (start, rrbt_params['start_uncertainty'])
-        
-        # Initialize planner with RRBT parameters
-        planner = RRBT(
-            start=start,
-            goal_region=rrbt_params['goal_region'],
-            obstacle=obstacle,
-            workspace=[0, 100],
-            animation=animation,
-            measurement_zone=rrbt_params['measurement_zone'],
-            process_noise=rrbt_params['process_noise'],
-            delta=rrbt_params['delta']
-        )
-    else:
-        # Initialize RRT or RRT_Connect as before
-        planner = select_planner(alg, start, goal, obstacle, animation)
+    # Ask if defaults are okay using inquirer
+    questions = [
+        inquirer.List('use_defaults',
+                     message='Use these default values?',
+                     choices=['Yes', 'No'],
+                     default='Yes')
+    ]
     
-    if debug_mode:
-        run_debug(planner)
-    else:
-        run_testing(planner, alg, obs)
+    if inquirer.prompt(questions)['use_defaults'] == 'Yes':
+        return {
+            'process_noise': defaults['process_noise'],
+            'start_uncertainty': defaults['sigma'] * np.eye(2),
+            'measurement_zone': defaults['measurement_zone']
+        }
+    
+    params = defaults.copy()    
+    
+    # Create list of parameters that can be changed
+    param_choices = [
+        ('Process noise', 'process_noise'),
+        ('Initial state uncertainty', 'sigma'),
+        ('Measurement zone', 'measurement_zone')
+    ]
+    
+    questions = [
+        inquirer.Checkbox('params_to_change',
+                         message='Select parameters to modify (use spacebar to select, enter to confirm)',
+                         choices=param_choices)
+    ]
+    to_change = inquirer.prompt(questions)['params_to_change']
+    
+    # For each selected parameter, prompt for new value
+    for param_name, param_key in param_choices:
+        if param_key in to_change:
+            if param_key in ['process_noise', 'sigma']:
+                questions = [
+                    inquirer.Text(param_key,
+                                message=f'Enter new value for {param_name}',
+                                default=str(params[param_key]))
+                ]
+                params[param_key] = float(inquirer.prompt(questions)[param_key])
+            else:  # measurement_zone
+                print(f"\nEnter new bounds for {param_name}:")
+                questions = [
+                    inquirer.Text('left', message='Left bound', default=str(params[param_key][0])),
+                    inquirer.Text('right', message='Right bound', default=str(params[param_key][1])),
+                    inquirer.Text('bottom', message='Bottom bound', default=str(params[param_key][2])),
+                    inquirer.Text('top', message='Top bound', default=str(params[param_key][3]))
+                ]
+                answers = inquirer.prompt(questions)
+                params[param_key] = (
+                    float(answers['left']),
+                    float(answers['right']),
+                    float(answers['bottom']),
+                    float(answers['top'])
+                )
+    
+    return {
+        'process_noise': params['process_noise'],
+        'start_uncertainty': params['sigma'] * np.eye(2),
+        'measurement_zone': params['measurement_zone']
+    }
 
 def get_start_goal_config():
     """Get default start and goal configurations
@@ -205,6 +249,14 @@ def select_planner(alg, start, goal, obstacle, animation):
             workspace=[0, 100],
             animation=animation
         )
+    elif alg == "PRM":
+        rrt = PRM(
+            start=start,
+            goal=goal,
+            obstacle=obstacle,
+            workspace=[0, 100],
+            animation=animation
+        )
     return rrt
 
 def histograms(alg, obs, iterations, num_verts):
@@ -252,15 +304,19 @@ def run_debug(planner, save_plot=False):
     path = planner.planning()
     
     if planner.animation:
-        planner.update_graph()
-        plt.plot([x for (x, _) in path], [y for (_, y) in path], '-r')
-        plt.grid(True)
-        plt.pause(0.01)
-        if save_plot:
-            plt.savefig(f"figures/debug_path.png", format="png", dpi=300)
+        if isinstance(planner, PRM) or isinstance(planner, BRM):
+            # start and goal position
+            if save_plot:
+                plt.savefig(f"figures/debug_path.png", format="png", dpi=300)
         else:
-            plt.show()
-    
+            planner.update_graph()
+            plt.plot([x for (x, _) in path], [y for (_, y) in path], '-r')
+            plt.grid(True)
+            plt.pause(0.01)
+            if save_plot:
+                plt.savefig(f"figures/debug_path.png", format="png", dpi=300)
+            else:
+                plt.show()
     return path
 
 def run_testing(planner, alg, obs, num_iters=100):
@@ -297,9 +353,52 @@ def run_testing(planner, alg, obs, num_iters=100):
     save_medians_to_csv(iterations, num_verts, 
                         [compute_path_length(p) for p in paths], alg, obs)
 
+def main(obs, alg, animation, debug_mode=True):
+    # Get start and goal configurations
+    start, goal = get_start_goal_config()
+    
+    # Get obstacle configuration
+    obstacle = get_obstacle_config(obs, start, goal)
+    
+    if alg == "RRBT":
+        # Get RRBT-specific parameters through interactive prompt
+        rrbt_params = get_rrbt_params(goal)
+        start = (start, rrbt_params['start_uncertainty'])
+        planner = RRBT(
+            start=start,
+            goal_region=rrbt_params['goal_region'],
+            obstacle=obstacle,
+            workspace=[0, 100],
+            animation=animation,
+            measurement_zone=rrbt_params['measurement_zone'],
+            process_noise=rrbt_params['process_noise'],
+            delta=rrbt_params['delta']
+        )
+    elif alg == "BRM":
+        brm_params = get_brm_params()
+        start = (start, brm_params['start_uncertainty'])
+        planner = BRM(
+            start=start,
+            goal=goal,
+            obstacle=obstacle,
+            workspace=[0, 100],
+            measurement_zone=brm_params['measurement_zone'],
+            process_noise=brm_params['process_noise'],
+            animation=animation,
+        )
+
+    else:
+        # Initialize RRT or RRT_Connect as before
+        planner = select_planner(alg, start, goal, obstacle, animation)
+    
+    if debug_mode:
+        run_debug(planner)
+    else:
+        run_testing(planner, alg, obs)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Run specific RRT algorithms with selected obstacles.")
+        description="Run specific planning algorithms with selected obstacles.")
     parser.add_argument(
         "--animation",
         type=str,
@@ -317,7 +416,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--algorithm",
         type=str,
-        choices=["RRT", "RRT_Connect", "RRBT"],
+        choices=["PRM", "RRT", "RRT_Connect", "RRBT", "BRM"],
         default="RRT",
         help="Select the RRT algorithm to run."
     )

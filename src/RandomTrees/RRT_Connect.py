@@ -1,9 +1,8 @@
 import random
-from RRT import RRT
+from RandomTrees.RRT import RRT
 from itertools import count
 
 import matplotlib.pyplot as plt
-
 
 class RRT_Connect(RRT):
     def __init__(self, start, goal, obstacle, workspace, animation=True, eta=2.5,

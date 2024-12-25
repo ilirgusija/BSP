@@ -1,6 +1,8 @@
 import math
 import random
 from itertools import count
+import utils as utils
+from rtree import index
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,14 +42,19 @@ class RRT:
         self.goal_sample_rate = goal_sample_rate
         self.animation = animation
         self.obstacle = []
+        self.rtree = index.Index()
         if isinstance(obstacle, tuple):
-            self.obstacle.append(self.convert_to_rectangle(
-                obstacle[0], obstacle[1], self.min_rand, self.max_rand))
+            left, right, bottom, top = o = utils.convert_to_rectangle(
+                obstacle[0], obstacle[1], self.min_rand, self.max_rand)
+            self.obstacle.append(o)
+            self.rtree.insert(0, (left, bottom, right, top))
         elif isinstance(obstacle, list):
-            for o in obstacle:
+            for i, o in enumerate(obstacle):
                 ref, length, orientation, translation = o
-                self.obstacle.append(self.generate_rectangle_from_reference(
-                    ref, length, orientation, translation))
+                left, right, bottom, top = self.generate_rectangle_from_reference(
+                    ref, length, orientation, translation)
+                self.obstacle.append((left, bottom, right, top))
+                self.rtree.insert(i, (left, bottom, right, top))
         self.vertices = []
         self.iterations = 0
         self.num_vertices = 0
@@ -71,7 +78,7 @@ class RRT:
 
     def steer(self, v_nearest, x_rand):
         x_new = self.Vertex(v_nearest.state)
-        d, angle = self.calc_distance_and_angle(x_new, x_rand)
+        d, angle = utils.calc_distance_and_angle(x_new.state, x_rand.state)
 
         x_new.path = [x_new.state]
         if self.eta < d:
@@ -89,24 +96,19 @@ class RRT:
     def is_vertex_valid(self, vertex):
         if vertex is None:
             return False
-        for o in self.obstacle:
-            left, right, bottom, top = o
-            if not isinstance(vertex, self.Vertex):
-                vertex = self.Vertex(vertex)
-            x, y = vertex.state[0], vertex.state[1]  # Extract x,y from state vector
-            if (left <= x <= right and bottom <= y <= top):
-                return False
-            # for point in vertex.path:
-            #     x, y = point[0], point[1]  # Extract x,y from state vector
-            #     if (left <= x <= right and bottom <= y <= top):
-            #         return False
-        return True
+        x, y = vertex[0], vertex[1]  # assuming vertex is [x, y]
+        
+        # query the r-tree directly
+        possible_obstacles = list(self.rtree.intersection((x, y, x, y)))
+        
+        # if any obstacles match, the point is invalid
+        return len(possible_obstacles) == 0
 
     def is_edge_valid(self, v_nearest, x_rand):
         path_resolution = 0.1
         x_new = self.Vertex(v_nearest.state)
-        d, angle = self.calc_distance_and_angle(x_new, x_rand)
-        if not self.is_vertex_valid(x_rand):
+        d, angle = utils.calc_distance_and_angle(x_new.state, x_rand.state)
+        if not self.is_vertex_valid(x_rand.state):
             return False
         x_new.path = [x_new.state]
 
@@ -117,11 +119,11 @@ class RRT:
 
         for _ in range(n_steps):
             x_new.state += path_resolution * np.array([math.cos(angle), math.sin(angle)])
-            if not self.is_vertex_valid(x_new):
+            if not self.is_vertex_valid(x_new.state):
                 return False
             x_new.path.append(x_new.state)
 
-        d, _ = self.calc_distance_and_angle(x_new, x_rand)
+        d, _ = utils.calc_distance_and_angle(x_new.state, x_rand.state)
         if d <= path_resolution:
             x_new.path.append(x_rand.state)
             x_new.state = x_rand.state
@@ -143,7 +145,7 @@ class RRT:
 
         for o in self.obstacle:
             # Plot the blue rectangle obstacle
-            self.plot_rectangle(o)
+            utils.plot_rectangle(o)
 
         # Plot the green start "S" and red goal "G"
         plt.plot(self.start.state[0], self.start.state[1],
@@ -168,8 +170,6 @@ class RRT:
         return sampled_vec
 
     def get_nearest_vertex(self, x_rand, vertices):
-        # if not isinstance(x_rand, self.Vertex):
-        #     x_rand = self.Vertex(x_rand)
         dlist = [np.linalg.norm(vertex.state - x_rand) for vertex in vertices]
         minind = dlist.index(min(dlist))
         return vertices[minind]
@@ -183,60 +183,3 @@ class RRT:
         path.append([vertex.state[0], vertex.state[1]])
         self.num_vertices = len(self.vertices)
         return path
-
-    @staticmethod
-    def convert_to_rectangle(l, width, min_rand, max_rand):
-        map_width = max_rand - min_rand  # Assuming square map
-
-        # Calculate the top, bottom, left, and right boundaries of the rectangle
-        top = max_rand - l
-        bottom = l
-        left = (map_width - width) / 2
-        right = left + width
-
-        # Check for valid rectangle within map bounds
-        if bottom < min_rand or top > max_rand or width > map_width:
-            raise ValueError(
-                "Invalid rectangle dimensions: exceeds map bounds.")
-
-        return left, right, bottom, top
-
-    @staticmethod
-    def plot_rectangle(rectangle, color="-b"):
-        left, right, bottom, top = rectangle
-
-        # Plot the rectangle
-        plt.fill([left, right, right, left, left], [bottom, bottom, top, top, bottom], color)
-
-    @staticmethod
-    def calc_distance_and_angle(parent, child):
-        dx = child.state[0] - parent.state[0]
-        dy = child.state[1] - parent.state[1]
-        length = math.hypot(dx, dy)
-        angle = math.atan2(dy, dx)
-        return length, angle
-
-    @staticmethod
-    def generate_rectangle_from_reference(reference, length, orientation="horizontal", translation=(10, 0)):
-        x_ref, y_ref = reference
-        dx, dy = translation
-        x_translated = x_ref + dx
-        y_translated = y_ref + dy
-
-        if orientation == "horizontal":
-            # Fixed height of 10, horizontal length is variable
-            left = x_translated-length/2
-            right = x_translated + length/2
-            bottom = y_translated - 2.5
-            top = y_translated + 2.5
-        elif orientation == "vertical":
-            # Fixed width of 10, vertical length is variable
-            left = x_translated - 2.5
-            right = x_translated + 2.5
-            bottom = y_translated-length/2
-            top = y_translated + length/2
-        else:
-            raise ValueError(
-                "Invalid orientation. Choose 'horizontal' or 'vertical'.")
-
-        return left, right, bottom, top

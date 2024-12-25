@@ -1,11 +1,11 @@
 import math
-from types import NoneType
 import numpy as np
-from traitlets import Instance
-from RRT import RRT
+from RandomTrees.RRT import RRT
 from itertools import count
+from sklearn.neighbors import KDTree
 from scipy.stats import multivariate_normal
 import matplotlib.pyplot as plt
+import utils
 
 
 class RRBT(RRT):
@@ -28,6 +28,10 @@ class RRBT(RRT):
 
         def __hash__(self):
             return hash(tuple(self.state))
+
+        # Define function for printing vertex
+        def __repr__(self):
+            return f"Vertex({self.state})"
 
         def dimension(self):
             """Return dimension of the state space"""
@@ -130,6 +134,25 @@ class RRBT(RRT):
         self.Q = process_noise * np.eye(self.start.dimension())
         self.measurement_zone = [measurement_zone]
         self.delta = delta
+        self.d = len(start[0])
+        
+                # Calculate volume of unit ball in d dimensions
+        match self.d:  # Source: https://en.wikipedia.org/wiki/Volume_of_an_n-ball
+            case 2:
+                self.zeta = 3.142
+            case 3:
+                self.zeta = 4.189
+            case 4:
+                self.zeta = 4.935
+            case 5:
+                self.zeta = 5.264
+            case 6:
+                self.zeta = 5.1677
+
+        measure_tot = self.max_rand ** self.d  # Measure of workspace
+        measure_obs = sum([(right-left) * (top-bottom) for left, right,
+                          bottom, top in self.obstacle])  # Measure of obstacles
+        self.measure_free = measure_tot - measure_obs  # Measure of free space
 
     def planning(self):
         """Main RRBT algorithm"""
@@ -206,14 +229,14 @@ class RRBT(RRT):
 
         for o in self.obstacle:
             # Plot the blue rectangle obstacle
-            self.plot_rectangle(o, color="-b")
+            utils.plot_rectangle(o, color="-b")
             
         for m in self.measurement_zone:
             # Plot the red measurement zone
-            self.plot_rectangle(m, color="-g")
+            utils.plot_rectangle(m, color="-g")
 
         # Plot the green start "S" and red goal "G"
-        self.plot_rectangle(self.goal_region, color="-b")
+        utils.plot_rectangle(self.goal_region, color="-b")
         plt.plot(self.start.state[0], self.start.state[1],
                  c="g", marker=r"$\mathbb{S}$")
         plt.plot(self.goal.state[0], self.goal.state[1],
@@ -464,34 +487,20 @@ class RRBT(RRT):
                 
         return True
 
-    def Near(self, vertex):
-        """Find nearby vertices within a certain radius"""
-        nearby_vertices = []
-        d = vertex.dimension()
+    def calculate_radius(self):
         n = len(self.vertices)
-
-        # Calculate volume of unit ball in d dimensions
-        match d:  # Source: https://en.wikipedia.org/wiki/Volume_of_an_n-ball
-            case 2:
-                zeta = 3.142
-            case 3:
-                zeta = 4.189
-            case 4:
-                zeta = 4.935
-            case 5:
-                zeta = 5.264
-            case 6:
-                zeta = 5.1677
-
-        measure_tot = self.max_rand ** d  # Measure of workspace
-        measure_obs = sum([(right-left) * (top-bottom) for left, right,
-                          bottom, top in self.obstacle])  # Measure of obstacles
-        measure_free = measure_tot - measure_obs  # Measure of free space
 
         # See ref [6] S. Karaman and E. Frazzoli, "Incremental Sampling-based \ 
         # Algorithms for Optimal Motion Planning" 2020
-        radius = min((2 * (1 + 1/d) * (measure_free / zeta) * (math.log(n) / n))
-                     ** (1 / d), self.eta)  # Radius based on dimensionality
+        radius = min((2 * (1 + 1/self.d) * (self.measure_free / self.zeta) * (math.log(n) / n))
+                     ** (1 / self.d), self.eta)  # Radius based on dimensionality
+        return radius
+
+    def Near(self, vertex):
+        """Find nearby vertices within a certain radius"""
+        nearby_vertices = []
+        
+        radius = self.calculate_radius()
 
         for v in self.vertices:
             if np.linalg.norm(v.state - vertex.state) < radius and v.state is not vertex.state:
@@ -505,7 +514,6 @@ class RRBT(RRT):
             e_neighbour = self.get_edge(v_rand, v_neighbour)
             if e_neighbour is None:
                 continue
-
 
             for node in v_neighbour.nodes:
                 node_new = self.Propagate(e_neighbour, v_rand.get_best_node() )  # returns n_end
