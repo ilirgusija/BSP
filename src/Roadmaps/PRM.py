@@ -2,11 +2,10 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.neighbors import KDTree
-import utils as utils
+import utils.utils as utils
 from rtree import index
 
 # parameter
-N_SAMPLE = 100  # number of sample_points
 MAX_EDGE_LEN = 30.0  # [m] Maximum edge length
 
 class PRM:
@@ -24,7 +23,7 @@ class PRM:
             return str(self.x) + "," + str(self.y) + "," +\
                 str(self.cost) + "," + str(self.parent_index)
 
-    def __init__(self, start, goal, obstacle, workspace, animation=True):
+    def __init__(self, start, goal, obstacle, workspace, num_samples=500, animation=True):
         """Initialize the PRM Planner
 
         Args:
@@ -39,6 +38,7 @@ class PRM:
         self.goal = goal
         self.min_rand = workspace[0]
         self.max_rand = workspace[1]
+        self.num_samples = num_samples
         self.animation = animation
         self.obstacle = []
         self.rtree = index.Index()
@@ -52,53 +52,9 @@ class PRM:
                 ref, length, orientation, translation = o
                 left, right, bottom, top = utils.generate_rectangle_from_reference(
                     ref, length, orientation, translation)
-                self.obstacle.append((left, bottom, right, top))
+                self.obstacle.append((left, right, bottom, top))
                 self.rtree.insert(i, (left, bottom, right, top))
         self.calculate_radius()
-
-    def plot_samples(self, sample):
-        if self.animation:
-            print("Plotting samples and obstacles")
-            utils.plot_rectangle(self.obstacle[0])
-            plt.grid(True)
-            plt.axis("equal")
-            plt.plot(self.start[0], self.start[1],
-                 c="g", marker=r"$\mathbb{S}$")
-            plt.plot(self.goal[0], self.goal[1],
-                 c="r", marker=r"$\mathbb{G}$")
-                # Extract x and y from sample points
-            sample_x = [p[0] for p in sample]
-            sample_y = [p[1] for p in sample]
-    
-            # Plot sample points
-            plt.plot(sample_x[:-2], sample_y[:-2], ".b")
-            plt.pause(1)
-
-    def plot_edges(self, road_map, sample):
-        for i, neighbors in enumerate(road_map):
-            for neighbor_idx in neighbors:
-                # get the start and end points of the edge
-                start_point = sample[i]
-                end_point = sample[neighbor_idx]
-
-                # extract x and y coordinates for plotting
-                path_x = [start_point[0], end_point[0]]
-                path_y = [start_point[1], end_point[1]]
-
-                # plot the edge as a yellow line
-                plt.plot(path_x, path_y, "-y")
-        plt.pause(0.01)
-
-    def plot_final_path(self, r):
-        # Extract x and y coordinates from the path
-        path_x = [point[0] for point in r]
-        path_y = [point[1] for point in r]
-        
-        # Plot the final path as a red line
-        plt.plot(path_x, path_y, "-r", linewidth=2, label="Final Path")
-        plt.legend()
-        plt.pause(0.001)
-        plt.show()
 
     def planning(self, rng=None):
         """
@@ -120,65 +76,36 @@ class PRM:
 
         r = self.dijkstra_planning(road_map, sample)
         
-        assert r, 'Cannot find path'
+        if len(r) == 0:
+            print('Cannot find path')
+            return False  
         
         if self.animation:
             self.plot_final_path(r)
 
         return r
 
-    def is_vertex_valid(self, vertex):
-        if vertex is None:
-            return False
-        x, y = vertex[0], vertex[1]  # assuming vertex is [x, y]
-        
-        # query the r-tree directly
-        possible_obstacles = list(self.rtree.intersection((x, y, x, y)))
-        
-        # if any obstacles match, the point is invalid
-        return len(possible_obstacles) == 0
-    
-    def is_edge_valid(self, from_vertex, to_vertex):
-        path_resolution = 0.1
-        x_new = from_vertex
-        d, angle = utils.calc_distance_and_angle(x_new, to_vertex)
+# 1. Sample points
+    def sample_points(self, rng):
+        samples = []
 
-        n_steps = math.floor(d / path_resolution)
+        if rng is None:
+            rng = np.random.default_rng()
 
-        for _ in range(n_steps):
-            x_new += path_resolution * np.array([math.cos(angle), math.sin(angle)])
-            if not self.is_vertex_valid(x_new):
-                return False
+        while len(samples) <= self.num_samples:
+            sample = [rng.random() * (self.max_rand - self.min_rand) + self.min_rand,
+                      rng.random() * (self.max_rand - self.min_rand) + self.min_rand]
+            
+            if not self.is_vertex_valid(sample):
+                continue
 
-        return True
+            samples.append(sample)
 
-    def calculate_radius(self):
-        d = len(self.start)
-        n = N_SAMPLE
+        samples.append(self.start)
+        samples.append(self.goal)
+        return samples
 
-        # Calculate volume of unit ball in d dimensions
-        match d:  # Source: https://en.wikipedia.org/wiki/Volume_of_an_n-ball
-            case 2:
-                zeta = 3.142
-            case 3:
-                zeta = 4.189
-            case 4:
-                zeta = 4.935
-            case 5:
-                zeta = 5.264
-            case 6:
-                zeta = 5.1677
-
-        measure_tot = self.max_rand ** d  # Measure of workspace
-        measure_obs = sum([(right-left) * (top-bottom) for left, right,
-                          bottom, top in self.obstacle])  # Measure of obstacles
-        measure_free = measure_tot - measure_obs  # Measure of free space
-
-        # See ref [6] S. Karaman and E. Frazzoli, "Incremental Sampling-based \ 
-        # Algorithms for Optimal Motion Planning" 2020
-        self.radius = min((2 * (1 + 1/d) * (measure_free / zeta) * (math.log(n) / n))
-                     ** (1 / d), MAX_EDGE_LEN)  # Radius based on dimensionality
-
+# 2. Generate Road Map
     def generate_road_map(self, samples):
         """
         Road map generation
@@ -188,7 +115,6 @@ class PRM:
         print("Generating road map")
         road_map = []
         n_sample = len(samples)
-        print(np.array(samples).shape)
         sample_kd_tree = KDTree(samples)
 
         for (_, vertex) in zip(range(n_sample), samples):
@@ -208,6 +134,7 @@ class PRM:
 
         return road_map
 
+# 3. Dijkstra Planning
     def dijkstra_planning(self, road_map, sample):
         """
         road_map: ??? [m]
@@ -262,7 +189,7 @@ class PRM:
                     open_set[n_id] = node
 
         if path_found is False:
-            return [], []
+            return []
 
         # generate final course
         r = [[goal_node.state[0], goal_node.state[1]]]
@@ -274,30 +201,100 @@ class PRM:
 
         return r
 
-    @staticmethod
-    def plot_road_map(road_map, sample):  # pragma: no cover
-        for i, _ in enumerate(road_map):
-            for ii in range(len(road_map[i])):
-                ind = road_map[i][ii]
+# Helper Functions
+    def is_vertex_valid(self, vertex):
+        if vertex is None:
+            return False
+        x, y = vertex[0], vertex[1]  # assuming vertex is [x, y]
+        
+        # query the r-tree directly
+        possible_obstacles = list(self.rtree.intersection((x, y, x, y)))
+        
+        # if any obstacles match, the point is invalid
+        return len(possible_obstacles) == 0
+    
+    def is_edge_valid(self, from_vertex, to_vertex):
+        step_size = 0.1
+        x_new = from_vertex
+        d, angle = utils.calc_distance_and_angle(x_new, to_vertex)
 
-                plt.plot([sample[i][0], sample[ind][0]],
-                         [sample[i][1], sample[ind][1]], "-k")
+        n_steps = math.floor(d / step_size)
 
-    def sample_points(self, rng):
-        samples = []
+        for _ in range(n_steps):
+            x_new += step_size * np.array([math.cos(angle), math.sin(angle)])
+            if not self.is_vertex_valid(x_new):
+                return False
 
-        if rng is None:
-            rng = np.random.default_rng()
+        return True
 
-        while len(samples) <= N_SAMPLE:
-            sample = [rng.random() * (self.max_rand - self.min_rand) + self.min_rand,
-                      rng.random() * (self.max_rand - self.min_rand) + self.min_rand]
-            
-            if not self.is_vertex_valid(sample):
-                continue
+    def calculate_radius(self):
+        d = len(self.start)
+        n = self.num_samples
 
-            samples.append(sample)
+        # Calculate volume of unit ball in d dimensions
+        match d:  # Source: https://en.wikipedia.org/wiki/Volume_of_an_n-ball
+            case 2:
+                zeta = 3.142
+            case 3:
+                zeta = 4.189
+            case 4:
+                zeta = 4.935
+            case 5:
+                zeta = 5.264
+            case 6:
+                zeta = 5.1677
 
-        samples.append(self.start)
-        samples.append(self.goal)
-        return samples
+        measure_tot = self.max_rand ** d  # Measure of workspace
+        measure_obs = sum([(right-left) * (top-bottom) for left, right,
+                          bottom, top in self.obstacle])  # Measure of obstacles
+        measure_free = measure_tot - measure_obs  # Measure of free space
+
+        # See ref [6] S. Karaman and E. Frazzoli, "Incremental Sampling-based \ 
+        # Algorithms for Optimal Motion Planning" 2020
+        self.radius = min((2 * (1 + 1/d) * (measure_free / zeta) * (math.log(n) / n))
+                     ** (1 / d), MAX_EDGE_LEN)  # Radius based on dimensionality
+    
+# Plotting Function
+    def plot_samples(self, sample):
+        if self.animation:
+            print("Plotting samples and obstacles")
+            for o in self.obstacle:
+                utils.plot_rectangle(o)
+            plt.grid(True)
+            plt.axis("equal")
+            plt.plot(self.start[0], self.start[1],
+                 c="g", marker=r"$\mathbb{S}$")
+            plt.plot(self.goal[0], self.goal[1],
+                 c="r", marker=r"$\mathbb{G}$")
+                # Extract x and y from sample points
+            sample_x = [p[0] for p in sample]
+            sample_y = [p[1] for p in sample]
+    
+            # Plot sample points
+            plt.plot(sample_x[:-2], sample_y[:-2], ".b")
+            plt.pause(1)
+
+    def plot_edges(self, road_map, sample):
+        for i, neighbors in enumerate(road_map):
+            for neighbor_idx in neighbors:
+                # get the start and end points of the edge
+                start_point = sample[i]
+                end_point = sample[neighbor_idx]
+
+                # extract x and y coordinates for plotting
+                path_x = [start_point[0], end_point[0]]
+                path_y = [start_point[1], end_point[1]]
+
+                # plot the edge as a yellow line
+                plt.plot(path_x, path_y, "-y")
+        plt.pause(0.01)
+
+    def plot_final_path(self, r):
+        # Extract x and y coordinates from the path
+        path_x = [point[0] for point in r]
+        path_y = [point[1] for point in r]
+        
+        # Plot the final path as a red line
+        plt.plot(path_x, path_y, "-r", linewidth=2, label="Final Path")
+        plt.legend()
+        plt.pause(1)

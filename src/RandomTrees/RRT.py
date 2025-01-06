@@ -1,7 +1,7 @@
 import math
 import random
 from itertools import count
-import utils as utils
+import utils.utils as utils
 from rtree import index
 
 import matplotlib.pyplot as plt
@@ -49,11 +49,14 @@ class RRT:
             self.obstacle.append(o)
             self.rtree.insert(0, (left, bottom, right, top))
         elif isinstance(obstacle, list):
+            print(f"Obstacle is a list")
             for i, o in enumerate(obstacle):
+                print(f"Obstacle {i}: {o}")
                 ref, length, orientation, translation = o
-                left, right, bottom, top = self.generate_rectangle_from_reference(
+                left, right, bottom, top = utils.generate_rectangle_from_reference(
                     ref, length, orientation, translation)
-                self.obstacle.append((left, bottom, right, top))
+                print(f"Rectangle {i}: {left, right, bottom, top}")
+                self.obstacle.append((left, right, bottom, top))
                 self.rtree.insert(i, (left, bottom, right, top))
         self.vertices = []
         self.iterations = 0
@@ -105,26 +108,29 @@ class RRT:
         return len(possible_obstacles) == 0
 
     def is_edge_valid(self, v_nearest, x_rand):
-        path_resolution = 0.1
-        x_new = self.Vertex(v_nearest.state)
+        step_size = 0.1
+        if not isinstance(v_nearest, self.Vertex):
+            x_new = self.Vertex(v_nearest)
+        else:
+            x_new = self.Vertex(v_nearest.state)
+        if not isinstance(x_rand, self.Vertex):
+            x_rand = self.Vertex(x_rand)
         d, angle = utils.calc_distance_and_angle(x_new.state, x_rand.state)
         if not self.is_vertex_valid(x_rand.state):
             return False
         x_new.path = [x_new.state]
 
-        if self.eta > d:
-            n_steps = math.floor(d / path_resolution)
-        else:
-            n_steps = math.floor(self.eta / path_resolution)
+        n_steps = math.floor(d / step_size)
 
         for _ in range(n_steps):
-            x_new.state += path_resolution * np.array([math.cos(angle), math.sin(angle)])
+            step = step_size * np.array([math.cos(angle), math.sin(angle)])
+            x_new.state += step
             if not self.is_vertex_valid(x_new.state):
                 return False
             x_new.path.append(x_new.state)
 
         d, _ = utils.calc_distance_and_angle(x_new.state, x_rand.state)
-        if d <= path_resolution:
+        if d <= step_size:
             x_new.path.append(x_rand.state)
             x_new.state = x_rand.state
 
@@ -163,11 +169,19 @@ class RRT:
             sampled_vec = self.goal.state
         else:
             while True:
+                # sampled_vec = np.array([self.truncate_float(random.uniform(self.min_rand, self.max_rand), 4),
+                #                                self.truncate_float(random.uniform(self.min_rand, self.max_rand),4)])
                 sampled_vec = np.array([random.uniform(self.min_rand, self.max_rand),
                                                random.uniform(self.min_rand, self.max_rand)])
+                
                 if self.is_vertex_valid(sampled_vec) is True:
                     break
         return sampled_vec
+
+    @staticmethod
+    def truncate_float(value, decimals):
+        factor = 10 ** decimals
+        return math.trunc(value * factor) / factor
 
     def get_nearest_vertex(self, x_rand, vertices):
         dlist = [np.linalg.norm(vertex.state - x_rand) for vertex in vertices]

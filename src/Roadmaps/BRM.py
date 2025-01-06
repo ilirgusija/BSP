@@ -1,12 +1,14 @@
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-import utils as utils
+import utils.utils as utils
 from scipy.stats import multivariate_normal
 from sklearn.neighbors import KDTree
 from Roadmaps.PRM import PRM
+import control as ct
 
-LARGE_VALUE = 1e6  # Large number to represent high uncertainty
+LARGE_VALUE = 1e11  # Large number to represent high uncertainty
+SMALL_VALUE = 0.001  # Small number to represent low uncertainty
 
 class BRM(PRM):
     class BeliefNode:
@@ -38,7 +40,7 @@ class BRM(PRM):
         def max_covariance(self):
             """Compute the maximum covariance in the path"""
             if self.parent is None:
-                self.sigma_max = LARGE_VALUE * np.eye(2)
+                self.sigma_max = (2*LARGE_VALUE) * np.eye(2)
             else:
                 self.sigma_max = max(self.sigma, self.parent.sigma_max, key=np.trace)
 
@@ -52,12 +54,14 @@ class BRM(PRM):
                         np.array_equal(self.P_tilde, other.P_tilde))
             return False
     
-    def __init__(self, start, goal, obstacle, workspace, measurement_zone, process_noise=0.001, animation=True):
-        super().__init__(start[0], goal, obstacle, workspace, animation)
+    def __init__(self, start, goal, obstacle, workspace, measurement_zone, process_noise=0.01, num_samples=100, animation=True, debug=True):
+        super().__init__(start[0], goal, obstacle, workspace, num_samples, animation)
         self.W_t = process_noise * np.eye(2)
         self.measurement_zone = [measurement_zone]
         self.start_belief = self.BeliefNode(self.start, sigma=start[1])
         self.start_belief.sigma_max = start[1]
+        self.init_dynamics()
+        self.debug = debug
           
     def planning(self, rng=None):
         """
@@ -77,16 +81,20 @@ class BRM(PRM):
         if self.animation:
             self.plot_edges(road_map, samples)
             
+        # r = self.bfs_minmax(road_map, samples, beliefs)
         r = self.bfs(road_map, samples, beliefs)
                 
-        assert r, 'Cannot find path'
+        if r is None:
+            print('Cannot find path')
+            return False  
         
         if self.animation:
-            self.plot_final_path(r)
-
-        return r
-     
-# Sample process
+            self.plot_final_path(r, samples)
+        path = self.get_final_path(r)
+        final_path = np.array([p.state for p in path])
+        return final_path, np.trace(r.sigma_max), np.trace(r.sigma)
+    
+# 1. Sample process
     def sample_points(self, rng=None):
         """
         Generate sample points and corresponding belief nodes.
@@ -109,51 +117,60 @@ class BRM(PRM):
         
         return samples, belief_nodes
 
-# Roadmap generation
+# 2. Roadmap generation
     def generate_road_map(self, samples):
         """
         Road map generation
 
         sample: [m] positions of sampled points
         """
-        print("Generating road map")
+        if self.debug:
+            print("Generating road map")
         road_map = []
         n_sample = len(samples)
         sample_kd_tree = KDTree(samples)
 
-        for (v_idx, vertex) in zip(range(n_sample), samples):
+        for (_, vertex) in zip(range(n_sample), samples):
             indices, dist = sample_kd_tree.query_radius(
                 np.array(vertex).reshape(1, -1), r=self.radius, return_distance=True
             )
             sorted_indices = np.argsort(dist)  # Sort indices based on distances
             indices = (indices[sorted_indices])[0]  # Sort indices accordingly
             
-            
             edge_id = []
             zetas = []
             for neighbor_idx in indices:
-                neighbour = samples[neighbor_idx] # Neighbour or neighbor? Canada or US?
+                neighbour = samples[neighbor_idx] 
                 if neighbour == vertex:
                     continue
-                if self.is_edge_valid(vertex, neighbour):
+                if self.is_edge_valid(vertex, neighbour) is True:
                     edge_id.append(neighbor_idx)
-                    trajectory = self.Connect(vertex, neighbour)
-                    zetas.append(self.zeta(trajectory))
+                    edge = self.Connect(vertex, neighbour)
+                    if edge is False:
+                        continue
+                    zetas.append(self.zeta(edge))
             road_map.append((edge_id, zetas))
-        print("Road map generated")
+        if self.debug:
+            print("Road map generated")
         return road_map
-        
+    
     def Connect(self, from_state, to_state):
         """
         Connect two vertices with a nominal trajectory, control inputs, and stabilizing feedback gains
+        according to equations (3)-(9).
+
         Args:
             from_vertex: Starting vertex (x^a)
             to_vertex: Target vertex (x^b)
+
         Returns:
-            List: X̌^(a,b) containing Nominal state trajectory
+            Tuple: (X̌^(a,b), Ǔ^(a,b), Ǩ^(a,b)) containing:
+                - Nominal state trajectory
+                - Nominal control inputs
+                - Feedback gains
         """
-        path_resolution = 0.1
-        X_nominal = []
+        # Initialize trajectory lists
+        X_nominal = [from_state]  # X̌^(a,b) = (x̃₀, x̃₁, ..., x̃ₜ)
         to_state = np.array(to_state)
         from_state = np.array(from_state)
 
@@ -161,30 +178,35 @@ class BRM(PRM):
             print(f"from_state: {from_state} and to_state: {to_state}")
             return False
         # Initial conditions (eq. 6)
-        current_state = from_state
-        X_nominal.append(current_state)
+        x_t = from_state
         
         # Generate trajectory using system dynamics (eq. 7)
         d = np.linalg.norm(to_state - from_state)
-        n_steps = int(d / path_resolution)  # Number of steps
+        n_steps = int(d / self.dt)  # Number of steps
         
         for i in range(n_steps+1):
+            dt = self.dt
             # Generate nominal control input
-            direction = to_state - current_state
+            direction = to_state - x_t
             if i == n_steps:
-                path_resolution = np.linalg.norm(direction)
-                if not (0 < path_resolution < 0.1):
+                dt = np.linalg.norm(direction)
+                if not (0 < dt < 0.1):
                     raise ValueError("Connect error: path resolution out of bounds.")
-            u_t = path_resolution * direction / np.linalg.norm(direction)
+            u_t = dt * direction / np.linalg.norm(direction)
+            # U_nominal.append(u_t)
 
             # Propagate state using nominal dynamics f(x̃ₜ₋₁, ũₜ₋₁, 0)
-            next_state = current_state + u_t  # Simple integrator model
-            if not self.is_vertex_valid(next_state):
+            x_ = x_t + u_t  # Simple integrator model 
+            if not self.is_vertex_valid(x_):
                 return False
-            X_nominal.append(next_state)
-            current_state = next_state
-
-        return X_nominal
+            X_nominal.append(x_)
+            x_t = x_
+            
+        if (X_nominal[-1] != to_state).all():
+            raise ValueError(f"Error: X_nominal[-1]: {X_nominal[-1]} is not to_state: {to_state}")
+        if (len(X_nominal)==1):
+            raise ValueError(f"Error: X_nominal: {X_nominal} is not a path.")
+        return np.array(X_nominal)
 
     def zeta(self, trajectory):
         """
@@ -205,11 +227,14 @@ class BRM(PRM):
         for t in range(len(trajectory) - 1):
             # Get current state and next state
             x_t = trajectory[t]
+            I = np.eye(2)
 
             # Compute Jacobians
-            H_t = G_t = V_t = np.eye(2)  # Jacobian of the measurement and motion model
-            Q_t = self.get_measurement_covariance(x_t)   # Measurement noise covariance
-            R_t = V_t @ self.W_t @ np.linalg.inv(V_t)  # Process noise covariance
+            H_t = I  # Jacobian of the measurement model w.r.t. the state
+            G_t = I  # Jacobian of the motion model w.r.t. the state
+            V_t = I  # Jacobian of the motion model w.r.t. the process noise 
+            Q_t = self.get_measurement_covariance(x_t)   # Measurement noise covariance (BRM paper has Q_t as the measurement noise covariance)
+            R_t = V_t @ self.W_t @ np.linalg.inv(V_t)  # Process noise covariance is W_t
 
             # Compute M_t = H_t.T @ Q_t @ H_t
             M_t = H_t.T @ np.linalg.inv(Q_t) @ H_t
@@ -226,73 +251,8 @@ class BRM(PRM):
 
         return S_ij      
 
-# Search Process
-    def bfs_minmax(self, road_map, samples, beliefs):
-        """
-        Perform BFS to explore the roadmap.
-
-        Args:
-            road_map: List of roadmap edges and their associated zeta values.
-            samples: List of sampled nodes.
-            sigma_0: Initial covariance matrix for the belief state.
-
-        Returns:
-            goal_node: The node at the goal if reachable, else None.
-        """
-        # Map each node to its index for efficient querying
-        node_index = {tuple(node): idx for idx, node in enumerate(samples)}
-
-        # Initialize the queue with the start node and its initial covariance        
-        queue = [self.start_belief]
-        n = len(samples[0])
-
-        while queue:
-            belief = queue.pop(0)
-
-            # Check if we've reached the goal
-            if np.array_equal(belief.state, self.goal):
-                print("Goal reached!")
-                continue
-
-            # Retrieve the current node's index
-            current_idx = node_index[tuple(belief.state)]
-
-            # Explore neighbors
-            neighbors, zetas = road_map[current_idx]
-            for neighbor_idx, zeta_ij in zip(neighbors, zetas):
-                neighbor = samples[neighbor_idx]
-                if belief.visited(neighbor):
-                    continue
-                
-                # Compute the updated covariance using the transfer function
-                zeta_nn_prime = self.transfer_func(belief, zeta_ij)
-                Psi = np.block([
-                    [belief.sigma],
-                    [np.eye(len(belief.sigma))]
-                ])
-                Psi_prime = zeta_nn_prime @ Psi
-                Psi_11 = Psi_prime[:n , :]
-                Psi_21 = Psi_prime[n:, :]
-                
-                if(np.linalg.det(Psi_21) == 0):
-                    Psi_21 = 0.01 * np.eye(2)
-                sigma_prime = Psi_11 @ np.linalg.inv(Psi_21)
-                
-                if max(np.trace(sigma_prime), np.trace(belief.sigma_max)) < np.trace(beliefs[neighbor_idx].sigma_max):
-                    # Add the neighbor to the queue
-                    beliefs[neighbor_idx].sigma = max(sigma_prime, belief.sigma_max, key=np.trace)
-                    beliefs[neighbor_idx].parent = belief
-                    beliefs[neighbor_idx].max_covariance()
-                    for i in range(len(queue)):
-                        if queue[i].state == neighbor:
-                            queue[i] = beliefs[neighbor_idx]
-                            break
-                    else:
-                        queue.append(beliefs[neighbor_idx])
-
-        print("Goal not reachable.")
-        return None
-
+# 3. Search Process
+# Just realized this may all be wrong.... well, be warned
     def bfs(self, road_map, samples, beliefs):
         """
         Perform BFS to explore the roadmap.
@@ -310,46 +270,46 @@ class BRM(PRM):
 
         # Initialize the queue with the start node and its initial covariance
         queue = [self.start_belief]
-        n = len(samples[0])
-
+        
         while queue:
             belief = queue.pop(0)
 
             # Check if we've reached the goal
             if np.array_equal(belief.state, self.goal):
-                print("Goal reached!")
-                return belief
+                if self.debug:
+                    ("Goal reached!")
+                continue
 
-            # Retrieve the current node's indexbelief.state
+            # Retrieve the current node's index belief.state
             current_idx = node_index[tuple(belief.state)]
 
-            print(f"Current state: {belief.state}, uncertainty: {np.trace(belief.sigma)}")
             # Explore neighbors
             neighbors, zetas = road_map[current_idx]
             for neighbor_idx, zeta_ij in zip(neighbors, zetas):
-                print(f"zetaj:")
-                print(f"{zeta_ij} to {samples[neighbor_idx]}")
                 neighbor = samples[neighbor_idx]
-                
                 if belief.visited(neighbor):
                     continue
 
                 # Compute the updated covariance using the transfer function
                 sigma_prime = self.transfer_func(belief, zeta_ij)
                 
+                # TODO: If ever using this again, consider that referencing a belief node in the queue may not be the same as the one in the belief list
+                # NVM probs good as long as the belief node is updated in the belief list
                 if beliefs[neighbor_idx].sigma is None or np.trace(sigma_prime) < np.trace(beliefs[neighbor_idx].sigma):
                     # Add the neighbor to the queue
                     beliefs[neighbor_idx].sigma = sigma_prime  
                     beliefs[neighbor_idx].parent = belief
                     for i in range(len(queue)):
                         if (queue[i].state == neighbor).all():
-                            queue[i] = beliefs[neighbor_idx]
+                            queue.append(beliefs[neighbor_idx]) 
+                            # queue[i] = beliefs[neighbor_idx]
                             break
                     else:
                         queue.append(beliefs[neighbor_idx])
 
-        print("Goal not reachable.")
-        return None
+        if self.debug:
+            ("Goal not reachable.")
+        return beliefs[-1]
 
     def transfer_func(self, from_vertex, S_1toT):
         """
@@ -364,9 +324,6 @@ class BRM(PRM):
             mean: Updated mean (numpy array).
             covariance: Updated covariance matrix (numpy array).
         """
-        # Motion and measurement models
-        # Compute the aggregate scattering matrix
-
         # Get the dimension of the state space
         dim = len(from_vertex.state)
 
@@ -445,8 +402,6 @@ class BRM(PRM):
         Returns:
             Measurement: Covariance matrix (2x2).
         """
-
-
         # Ensure the vertex is 2D
         d = len(state)
         if d != 2:
@@ -456,7 +411,7 @@ class BRM(PRM):
         for m in self.measurement_zone:
             left, right, bottom, top = m
             if left < state[0] < right and bottom < state[1] < top:
-                return 0.001 * np.eye(d)  # Low measurement noise
+                return SMALL_VALUE * np.eye(d)  # Low measurement noise
 
         # Return high uncertainty if outside measurement zones
         return LARGE_VALUE * np.eye(d)
@@ -487,16 +442,28 @@ class BRM(PRM):
                 
         return True
 
+    def init_dynamics(self):
+        self.dt = 0.1
+        A = np.array([[0, 0], [0, 0]])
+        B = 10*np.eye(2)
+        C = np.eye(2)
+        self.sys = ct.ss(A, B, C, 0)
+        self.sys_dt = self.sys.sample(self.dt)
+        self.A = self.sys_dt.A
+        self.B = self.sys_dt.B
+        self.C = self.sys_dt.C
+        self.K, _, _ = ct.dlqr(self.sys_dt.A, self.sys_dt.B, np.eye(2), np.eye(2))
+
 # Plotting functions
     def plot_samples(self, sample):
         if self.animation:
-            print("Plotting samples and obstacles")
-            for o in self.obstacle:
-                # Plot the blue rectangle obstacle
-                utils.plot_rectangle(o, color="-b")
+            # print("Plotting samples and obstacles")
             for m in self.measurement_zone:
                 # Plot the red measurement zone
                 utils.plot_rectangle(m, color="-g")
+            for o in self.obstacle:
+                # Plot the blue rectangle obstacle
+                utils.plot_rectangle(o, color="-b")
             plt.grid(True)
             plt.axis("equal")
             plt.plot(self.start[0], self.start[1],
@@ -509,7 +476,7 @@ class BRM(PRM):
     
             # Plot sample points
             plt.plot(sample_x[:-2], sample_y[:-2], ".b")
-            plt.pause(1)
+            plt.pause(0.01)
 
     def plot_covariance(self, mean, cov):
         """
@@ -534,35 +501,44 @@ class BRM(PRM):
             xy=mean, width=width, height=height, angle=angle, edgecolor='r', fc='None', lw=2)
         plt.gca().add_patch(ellipse)
 
-    def plot_edges(self, road_map, sample):
+    def plot_edges(self, road_map, samples):
+        plt.clf()
         for v_idx, (neighbors, _) in enumerate(road_map):
             for neighbor_idx in neighbors:
                 # get the start and end points of the edge
-                start_point = sample[v_idx]
-                end_point = sample[neighbor_idx]
+                start_point = samples[v_idx]
+                end_point = samples[neighbor_idx]
 
                 # extract x and y coordinates for plotting
                 path_x = [start_point[0], end_point[0]]
                 path_y = [start_point[1], end_point[1]]
 
-                # plot the edge as a yellow line
+                # plot the edge as a yellow line underneath the samples
                 plt.plot(path_x, path_y, "-y")
-        plt.pause(0.001)
+        self.plot_samples(samples)
 
-    def plot_final_path(self, goal_belief):
-        # Extract x and y coordinates from the path
-        path_x = []
-        path_y = []
+    def get_final_path(self, goal_belief):
+        path = []
         parent = goal_belief
         while parent is not None:
-            path_x.append(parent.state[0])
-            path_y.append(parent.state[1])
-            print(f"state: {parent.state}, uncertainty: {np.trace(parent.sigma)}")
-            self.plot_covariance(parent.state, parent.sigma)
+            path.append(parent)
             parent = parent.parent
-        
+        return path
+
+    def plot_final_path(self, goal_belief, samples):
+        # Extract x and y coordinates from the path
+        plt.clf()
+        self.plot_samples(samples)
+        path = self.get_final_path(goal_belief)
+        par_states = np.array([p.state for p in path])
+        path_x = par_states[:, 0]
+        path_y = par_states[:, 1]
+        for parent in path:
+            if self.debug:
+                print(f"state: {parent.state}, uncertainty: {np.trace(parent.sigma)}")
+            self.plot_covariance(parent.state, parent.sigma)
+            
         # Plot the final path as a red line
         plt.plot(path_x, path_y, "-r", linewidth=2, label="Final Path")
         plt.legend()
-        plt.pause(0.001)
-        plt.show()
+        plt.pause(1)
